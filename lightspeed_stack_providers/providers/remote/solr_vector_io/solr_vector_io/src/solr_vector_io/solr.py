@@ -30,7 +30,6 @@ log = get_logger(name=__name__, category="vector_io::solr")
 VERSION = "v1"
 VECTOR_DBS_PREFIX = f"vector_dbs:solr:{VERSION}::"
 
-
 class SolrIndex(EmbeddingIndex):
     """
     Read-only Solr vector index implementation using DenseVectorField and KNN search.
@@ -80,6 +79,41 @@ class SolrIndex(EmbeddingIndex):
             transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0"),
         )
 
+    def _build_solr_params(
+        self,
+        mandatory_params: dict[str, Any],
+        extra_solr_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build Solr parameters by merging extra params with mandatory params.
+
+        Mandatory params override any conflicting keys in extra_solr_params.
+        Special handling for 'fq' parameter: merges chunk_window_config filter
+        with any fq values from extra_solr_params.
+
+        Args:
+            mandatory_params: Required parameters that override extra_solr_params
+            extra_solr_params: Optional extra parameters from user
+
+        Returns:
+            Merged Solr parameters dict
+        """
+        # Merge: extra params first, then mandatory params override
+        solr_params = (extra_solr_params or {}) | mandatory_params
+
+        # Special handling for fq: merge chunk filter with any extra fq values
+        chunk_fq = self.chunk_window_config.chunk_filter_query if self.chunk_window_config else None
+        extra_fq = extra_solr_params.get("fq") if extra_solr_params else None
+
+        if chunk_fq or extra_fq:
+            # Merge and flatten fq parameters (can be str or list[str])
+            fqs = [fq for fq in [chunk_fq, extra_fq] if fq is not None]
+            merged_fq = [item for x in fqs for item in (x if isinstance(x, list) else [x])]
+            solr_params["fq"] = merged_fq
+            log.debug(f"Applied filter queries: {merged_fq}")
+
+        return solr_params
+
     async def initialize(self) -> None:
         """Verify connection to Solr and collection exists."""
         log.info(f"Initializing connection to Solr collection: {self.collection_name}")
@@ -123,11 +157,12 @@ class SolrIndex(EmbeddingIndex):
         )
         raise NotImplementedError("SolrVectorIO is read-only.")
 
-    async def query_vector(
+    async def query_vector_with_filter(
         self,
         embedding: NDArray,
         k: int,
         score_threshold: float,
+        extra_solr_params: dict[str, Any] = {},
     ) -> QueryChunksResponse:
         """
         Performs vector similarity search using Solr's KNN query.
@@ -136,6 +171,7 @@ class SolrIndex(EmbeddingIndex):
             embedding: The query embedding vector
             k: Number of results to return
             score_threshold: Minimum similarity score threshold
+            extra_solr_params: Extra parameters to add to the Solr request.  Supports every Solr parameter except: q, rows, fl
 
         Returns:
             QueryChunksResponse with matching chunks and scores
@@ -147,27 +183,20 @@ class SolrIndex(EmbeddingIndex):
 
         async with self._create_http_client() as client:
             # Solr KNN query using the dense vector field
-            # Use knn-search endpoint with JSON body
+            # Use semantic-search endpoint with JSON body
             # Solr expects format: [f1,f2,f3]
             vector_list = embedding.tolist()
 
-            # Build params for knn-search endpoint
-            solr_params = {
+            # Build params for semantic-search endpoint
+            mandatory_params = {
                 "q": f"{{!knn f={self.vector_field} topK={k}}}{vector_list}",
                 "rows": str(k),
                 "fl": "*, score",
             }
 
-            # Add filter query for chunk documents if schema is configured
-            if self.chunk_window_config and self.chunk_window_config.chunk_filter_query:
-                solr_params["fq"] = self.chunk_window_config.chunk_filter_query
-                log.debug(
-                    f"Applying chunk filter: {
-                        self.chunk_window_config.chunk_filter_query
-                    }"
-                )
+            solr_params = self._build_solr_params(mandatory_params, extra_solr_params)
 
-            # Wrap in params structure for knn-search endpoint
+            # Wrap in params structure for semantic-search endpoint
             json_body = {"params": solr_params}
 
             try:
@@ -233,11 +262,12 @@ class SolrIndex(EmbeddingIndex):
                 log.exception(f"Error querying Solr with vector search: {e}")
                 raise
 
-    async def query_keyword(
+    async def query_keyword_with_filter(
         self,
         query_string: str,
         k: int,
         score_threshold: float,
+        extra_solr_params: dict[str, Any] = {},
     ) -> QueryChunksResponse:
         """
         Performs keyword-based search using Solr's text search.
@@ -331,14 +361,14 @@ class SolrIndex(EmbeddingIndex):
                 log.exception(f"Error querying Solr with keyword search: {e}")
                 raise
 
-    async def query_hybrid(
+    async def query_hybrid_with_filter(
         self,
         embedding: NDArray,
         query_string: str,
         k: int,
         score_threshold: float,
-        reranker_type: str,
         reranker_params: dict[str, Any] | None = None,
+        extra_solr_params: dict[str, Any] = {},
     ) -> QueryChunksResponse:
         """
         Hybrid search combining vector similarity and keyword search using Solr's native reranking.
@@ -348,8 +378,8 @@ class SolrIndex(EmbeddingIndex):
             query_string: The text query for keyword search
             k: Number of results to return
             score_threshold: Minimum similarity score threshold
-            reranker_type: Type of reranker (ignored, uses Solr's native capabilities)
             reranker_params: Parameters for reranking (e.g., boost values)
+            solr_params
 
         Returns:
             QueryChunksResponse with combined results
@@ -368,9 +398,7 @@ class SolrIndex(EmbeddingIndex):
         )
 
         async with self._create_http_client() as client:
-            # Use POST to avoid URI length limits with large embeddings
-            # Solr expects format: [f1,f2,f3]
-            vector_str = "[" + ",".join(str(v) for v in embedding.tolist()) + "]"
+            vector_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
             # Construct hybrid query using Solr's query boosting
             # This uses both KNN and text search with configurable boosts
@@ -1079,7 +1107,9 @@ class SolrVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPri
         query_string = interleaved_content_as_str(query)
 
         if mode == "keyword":
-            result = await index.index.query_keyword(query_string, k, score_threshold)
+            result = await index.index.query_keyword_with_filter(
+                query_string, k, score_threshold
+            )
         else:
             # auto-generate the embedding
             # embeddings_response = await index.inference_api.openai_embeddings(index.vector_db.embedding_model, [query_string])
@@ -1093,19 +1123,17 @@ class SolrVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPri
                 # query_string: str,
                 # k: int,
                 # score_threshold: float,
-                # reranker_type: str,
                 # reranker_params: dict[str, Any] | None = None,
 
-                result = await index.index.query_hybrid(
+                result = await index.index.query_hybrid_with_filter(
                     embedding=query_vector,
                     query_string=query_string,
                     k=k,
                     score_threshold=score_threshold,
-                    reranker_type=solr_reranker_type,
                     reranker_params=solr_reranker_params,
                 )
             else:
-                result = await index.index.query_vector(
+                result = await index.index.query_vector_with_filter(
                     query_vector, k, score_threshold
                 )
 
