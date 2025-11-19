@@ -286,7 +286,7 @@ class SolrIndex(EmbeddingIndex):
         )
 
         async with self._create_http_client() as client:
-            solr_params = {
+            mandatory_params = {
                 "q": query_string,
                 "rows": k,
                 "fl": "*, score",
@@ -294,14 +294,7 @@ class SolrIndex(EmbeddingIndex):
                 "defType": "edismax",  # Use extended DisMax for better text search
             }
 
-            # Add filter query for chunk documents if schema is configured
-            if self.chunk_window_config and self.chunk_window_config.chunk_filter_query:
-                solr_params["fq"] = self.chunk_window_config.chunk_filter_query
-                log.debug(
-                    f"Applying chunk filter: {
-                        self.chunk_window_config.chunk_filter_query
-                    }"
-                )
+            solr_params = self._build_solr_params(mandatory_params, extra_solr_params)
 
             try:
                 log.debug("Sending keyword query to Solr using edismax parser")
@@ -404,7 +397,7 @@ class SolrIndex(EmbeddingIndex):
             # This uses both KNN and text search with configurable boosts
             # The keyword_boost is applied via the reRankWeight for the text query
             # and vector_boost is applied via reRankWeight for the KNN reranking
-            data_params = {
+            mandatory_params = {
                 "q": query_string,
                 "rq": f"{{!rerank reRankQuery=$rqq reRankDocs={k * 2} reRankWeight={vector_boost}}}",
                 "rqq": f"{{!knn f={self.vector_field} topK={k * 2}}}{vector_str}",
@@ -415,14 +408,7 @@ class SolrIndex(EmbeddingIndex):
             }
             # Note: keyword_boost can be incorporated in future by discovering schema fields
 
-            # Add filter query for chunk documents if schema is configured
-            if self.chunk_window_config and self.chunk_window_config.chunk_filter_query:
-                data_params["fq"] = self.chunk_window_config.chunk_filter_query
-                log.debug(
-                    f"Applying chunk filter: {
-                        self.chunk_window_config.chunk_filter_query
-                    }"
-                )
+            data_params = self._build_solr_params(mandatory_params, extra_solr_params)
 
             try:
                 log.debug(
