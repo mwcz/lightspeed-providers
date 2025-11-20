@@ -1,27 +1,27 @@
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
-from numpy.typing import NDArray
 from llama_stack.apis.common.errors import VectorStoreNotFoundError
 from llama_stack.apis.files.files import Files
 from llama_stack.apis.inference import InterleavedContent
-from llama_stack.apis.vector_io import Chunk, QueryChunksResponse, VectorIO
 from llama_stack.apis.vector_dbs import VectorDB
+from llama_stack.apis.vector_io import Chunk, QueryChunksResponse, VectorIO
 from llama_stack.log import get_logger
 from llama_stack.providers.datatypes import Api, VectorDBsProtocolPrivate
+from llama_stack.providers.utils.inference.prompt_adapter import (
+    interleaved_content_as_str,
+)
 from llama_stack.providers.utils.kvstore import kvstore_impl
 from llama_stack.providers.utils.memory.openai_vector_store_mixin import (
     OpenAIVectorStoreMixin,
-)
-from llama_stack.providers.utils.inference.prompt_adapter import (
-    interleaved_content_as_str,
 )
 from llama_stack.providers.utils.memory.vector_store import (
     ChunkForDeletion,
     EmbeddingIndex,
     VectorDBWithIndex,
 )
+from numpy.typing import NDArray
 
 from .config import SolrVectorIOConfig
 
@@ -29,6 +29,7 @@ log = get_logger(name=__name__, category="vector_io::solr")
 
 VERSION = "v1"
 VECTOR_DBS_PREFIX = f"vector_dbs:solr:{VERSION}::"
+
 
 class SolrIndex(EmbeddingIndex):
     """
@@ -102,13 +103,19 @@ class SolrIndex(EmbeddingIndex):
         solr_params = (extra_solr_params or {}) | mandatory_params
 
         # Special handling for fq: merge chunk filter with any extra fq values
-        chunk_fq = self.chunk_window_config.chunk_filter_query if self.chunk_window_config else None
+        chunk_fq = (
+            self.chunk_window_config.chunk_filter_query
+            if self.chunk_window_config
+            else None
+        )
         extra_fq = extra_solr_params.get("fq") if extra_solr_params else None
 
         if chunk_fq or extra_fq:
             # Merge and flatten fq parameters (can be str or list[str])
             fqs = [fq for fq in [chunk_fq, extra_fq] if fq is not None]
-            merged_fq = [item for x in fqs for item in (x if isinstance(x, list) else [x])]
+            merged_fq = [
+                item for x in fqs for item in (x if isinstance(x, list) else [x])
+            ]
             solr_params["fq"] = merged_fq
             log.debug(f"Applied filter queries: {merged_fq}")
 
@@ -156,6 +163,35 @@ class SolrIndex(EmbeddingIndex):
             } chunks from read-only SolrIndex"
         )
         raise NotImplementedError("SolrVectorIO is read-only.")
+
+    async def query_vector(
+        self,
+        embedding: NDArray,
+        k: int,
+        score_threshold: float,
+        extra_solr_params: dict[str, Any] = {},
+    ) -> QueryChunksResponse:
+        raise NotImplementedError("We have query_vector_with_filter at home.")
+
+    async def query_keyword(
+        self,
+        query_string: str,
+        k: int,
+        score_threshold: float,
+        extra_solr_params: dict[str, Any] = {},
+    ) -> QueryChunksResponse:
+        raise NotImplementedError("We have query_keyword_with_filter at home.")
+
+    async def query_hybrid(
+        self,
+        embedding: NDArray,
+        query_string: str,
+        k: int,
+        score_threshold: float,
+        reranker_params: dict[str, Any] | None = None,
+        extra_solr_params: dict[str, Any] = {},
+    ) -> QueryChunksResponse:
+        raise NotImplementedError("We have query_hybrid_with_filter at home.")
 
     async def query_vector_with_filter(
         self,
@@ -1074,6 +1110,7 @@ class SolrVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPri
         k = params.get("max_chunks", 3)
         mode = params.get("mode")
         embedding = params.get("embedding")
+        extra_solr_params = params.get("solr", {})
 
         score_threshold = params.get("score_threshold", 0.0)
         vector_boost = params.get("rerank_vector_boost", 1.0)
@@ -1084,7 +1121,6 @@ class SolrVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPri
         keyword_boost = 1.0
 
         # see docstring for query_hybrid. tl;dr: the "reranker type" is a llama-stack thing and may not be applicable to Solr (if it is applicable, we will implement it later)
-        solr_reranker_type = "doesntmatter"
         solr_reranker_params = {
             vector_boost: vector_boost,
             keyword_boost: keyword_boost,
@@ -1093,12 +1129,14 @@ class SolrVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPri
         query_string = interleaved_content_as_str(query)
 
         if mode == "keyword":
-            result = await index.index.query_keyword_with_filter(
-                query_string, k, score_threshold
+            result = await cast(SolrIndex, index.index).query_keyword_with_filter(
+                query_string, k, score_threshold, extra_solr_params
             )
         else:
             # auto-generate the embedding
-            embeddings_response = await index.inference_api.openai_embeddings(index.vector_db.embedding_model, [query_string])
+            embeddings_response = await index.inference_api.openai_embeddings(
+                index.vector_db.embedding_model, [query_string]
+            )
             embedding = embeddings_response.data[0].embedding
 
             query_vector = np.array(embedding, dtype=np.float32)
@@ -1117,10 +1155,11 @@ class SolrVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPri
                     k=k,
                     score_threshold=score_threshold,
                     reranker_params=solr_reranker_params,
+                    extra_solr_params=extra_solr_params,
                 )
             else:
                 result = await index.index.query_vector_with_filter(
-                    query_vector, k, score_threshold
+                    query_vector, k, score_threshold, extra_solr_params
                 )
 
         log.debug(f"Query returned {len(result.chunks)} chunks")
