@@ -458,7 +458,7 @@ class SolrIndex(EmbeddingIndex):
             # and vector_boost is applied via reRankWeight for the KNN reranking
             mandatory_params = {
                 "q": query_string,
-                "rq": f"{{!rerank reRankQuery=$rqq reRankDocs={k * 2} reRankWeight={vector_boost}}}",
+                "rq": f"{{!rerank reRankOperator=multiply reRankQuery=$rqq reRankDocs={k * 2} reRankWeight={vector_boost}}}",
                 "rqq": f"{{!knn f={self.vector_field} topK={k * 2}}}{vector_str}",
                 "rows": k,
                 "fl": "*, score",
@@ -484,7 +484,7 @@ class SolrIndex(EmbeddingIndex):
                     f"reRankWeight={vector_boost}"
                 )
                 response = await client.post(
-                    f"{self.base_url}/select",
+                    f"{self.base_url}/hybrid-search",
                     data=solr_params,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
