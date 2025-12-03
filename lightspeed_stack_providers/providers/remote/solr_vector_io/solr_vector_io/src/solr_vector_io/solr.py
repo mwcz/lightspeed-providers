@@ -6,7 +6,12 @@ from llama_stack.apis.common.errors import VectorStoreNotFoundError
 from llama_stack.apis.files.files import Files
 from llama_stack.apis.inference import InterleavedContent
 from llama_stack.apis.vector_dbs import VectorDB
-from llama_stack.apis.vector_io import Chunk, QueryChunksResponse, VectorIO
+from llama_stack.apis.vector_io import (
+    Chunk,
+    ChunkMetadata,
+    QueryChunksResponse,
+    VectorIO,
+)
 from llama_stack.log import get_logger
 from llama_stack.providers.datatypes import Api, VectorDBsProtocolPrivate
 from llama_stack.providers.utils.inference.prompt_adapter import (
@@ -232,6 +237,15 @@ class SolrIndex(EmbeddingIndex):
 
             solr_params = self._build_solr_params(mandatory_params, extra_solr_params)
 
+            # Add filter query for chunk documents if schema is configured
+            if self.chunk_window_config and self.chunk_window_config.chunk_filter_query:
+                solr_params["fq"].append(self.chunk_window_config.chunk_filter_query)
+                log.debug(
+                    f"Applying chunk filter: {
+                        self.chunk_window_config.chunk_filter_query
+                    }"
+                )
+
             # Wrap in params structure for semantic-search endpoint
             json_body = {"params": solr_params}
 
@@ -331,6 +345,15 @@ class SolrIndex(EmbeddingIndex):
             }
 
             solr_params = self._build_solr_params(mandatory_params, extra_solr_params)
+
+            # Add filter query for chunk documents if schema is configured
+            if self.chunk_window_config and self.chunk_window_config.chunk_filter_query:
+                solr_params["fq"].append(self.chunk_window_config.chunk_filter_query)
+                log.debug(
+                    f"Applying chunk filter: {
+                        self.chunk_window_config.chunk_filter_query
+                    }"
+                )
 
             try:
                 log.debug("Sending keyword query to Solr using edismax parser")
@@ -444,7 +467,16 @@ class SolrIndex(EmbeddingIndex):
             }
             # Note: keyword_boost can be incorporated in future by discovering schema fields
 
-            data_params = self._build_solr_params(mandatory_params, extra_solr_params)
+            solr_params = self._build_solr_params(mandatory_params, extra_solr_params)
+
+            # Add filter query for chunk documents if schema is configured
+            if self.chunk_window_config and self.chunk_window_config.chunk_filter_query:
+                solr_params["fq"].append(self.chunk_window_config.chunk_filter_query)
+                log.debug(
+                    f"Applying chunk filter: {
+                        self.chunk_window_config.chunk_filter_query
+                    }"
+                )
 
             try:
                 log.debug(
@@ -453,7 +485,7 @@ class SolrIndex(EmbeddingIndex):
                 )
                 response = await client.post(
                     f"{self.base_url}/select",
-                    data=data_params,
+                    data=solr_params,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
                 response.raise_for_status()
@@ -816,11 +848,19 @@ class SolrIndex(EmbeddingIndex):
                     if url:
                         expanded_metadata["reference_url"] = url
 
+                # Create ChunkMetadata for expanded chunk
+                expanded_chunk_metadata = ChunkMetadata(
+                    chunk_id=chunk.stored_chunk_id,
+                    document_id=expanded_metadata.get("parent_id"),
+                    source=expanded_metadata.get("reference_url"),
+                )
+
                 # Create expanded chunk
                 expanded_chunk = Chunk(
                     content=final_content,
                     metadata=expanded_metadata,
                     stored_chunk_id=chunk.stored_chunk_id,
+                    chunk_metadata=expanded_chunk_metadata,
                 )
 
                 expanded_chunks.append(expanded_chunk)
@@ -950,12 +990,20 @@ class SolrIndex(EmbeddingIndex):
             # Remaining fields become metadata
             metadata = clean_doc
 
+            # Create ChunkMetadata with available information
+            chunk_metadata = ChunkMetadata(
+                chunk_id=chunk_id,
+                document_id=metadata.get("parent_id"),
+                source=metadata.get("reference_url"),
+            )
+
             log.debug(f"Converted Solr document to chunk: chunk_id={chunk_id}")
             return Chunk(
                 content=content,
                 metadata=metadata,
                 embedding=embedding,
                 stored_chunk_id=chunk_id,
+                chunk_metadata=chunk_metadata,
             )
 
         except Exception as e:
