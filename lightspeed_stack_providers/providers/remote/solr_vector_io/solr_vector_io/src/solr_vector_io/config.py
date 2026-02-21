@@ -70,8 +70,24 @@ class ChunkWindowConfig(BaseModel):
     )
 
     # ---- Chunk window expansion parameters ----
-    token_budget: int = Field(
-        default=2048, description="Max token budget per expanded context window"
+
+    chunk_family_fields: list[str] | None = Field(
+        default=None,
+        description=(
+            "Solr fields that should match when concatenating chunks for additional context "
+            "(e.g. ['parent_id', 'heading']). When not set, only parent_id is used."
+        ),
+    )
+    family_token_budget: int = Field(
+        default=2048,
+        description="Max token budget per expanded context window for chunks that belong to a family",
+    )
+    orphan_token_budget: int = Field(
+        default=512,
+        description=(
+            "Max token budget for chunks missing one or more chunk_family_fields values. "
+            "These chunks lack family context, so less surrounding context is fetched."
+        ),
     )
     min_chunk_gap: int = Field(
         default=4, description="Min gap between anchors to avoid overlap"
@@ -79,6 +95,7 @@ class ChunkWindowConfig(BaseModel):
     min_chunk_window: int = Field(
         default=4, description="Min number of chunks before windowing applies"
     )
+
 
 
 @json_schema_type
@@ -170,8 +187,10 @@ class SolrVectorIOConfig(BaseModel):
             #   "parent_content_title_field": "title",
             #   "parent_content_url_field": "reference_url",
             #   "chunk_filter_query": "is_chunk:true",
-            #   "token_budget": 2048,
+            #   "family_token_budget": 2048,
+            #   "orphan_token_budget": 512,
             #   "min_chunk_gap": 4,
             #   "min_chunk_window": 4,
+            #   "chunk_family_fields": ["parent_id", "heading"],
             # }
         }
